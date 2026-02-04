@@ -1,87 +1,115 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert } from 'react-native';
-import { Camera } from 'expo-camera';
-import { Audio } from 'expo-av';
-
-const MORSE_CODE: any = {
-  'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.', 'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..', 'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.', 'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-', 'Y': '-.--', 'Z': '--..', '1': '.----', '2': '..---', '3': '...--', '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..', '9': '----.', '0': '-----', ' ': '/'
-};
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { generateMorseEvents, textToMorse } from './src/utils/morse';
 
 export default function App() {
   const [text, setText] = useState('');
   const [flashing, setFlashing] = useState(false);
-  // Using generic type approach to avoid specific Camera Type issues if versions mismatch, 
-  // relying on clean implementation for now.
-  const [permission, requestPermission] = Camera.useCameraPermissions();
+  const [flashOn, setFlashOn] = useState(false);
+
+  const [permission, requestPermission] = useCameraPermissions();
+  const abortController = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    requestPermission();
-  }, []);
+    if (!permission?.granted) {
+      requestPermission();
+    }
+  }, [permission, requestPermission]);
+
+  const stopTransmission = () => {
+    if (abortController.current) {
+      abortController.current.abort();
+      abortController.current = null;
+    }
+    setFlashing(false);
+    setFlashOn(false);
+  };
 
   const transmit = async () => {
-    if (!permission?.granted) {
-      Alert.alert("Permission Required", "Camera permission is needed for the flashlight.");
-      return;
+    if (flashing) {
+        stopTransmission();
+        return;
     }
-    setFlashing(true);
-    const code = text.toUpperCase().split('').map(c => MORSE_CODE[c] || '').join(' ');
 
-    // Simulate flash loop (Camera API logic would go here, simplified for robust "logic" demo without complex Camera ref handling in this snippet)
-    // In a real device test, we'd toggle Torch mode.
-
-    let delay = 0;
-    const unit = 200; // ms
-
-    for (let char of code) {
-      if (char === '.') {
-        // Flash on
-        setTimeout(() => console.log('ON'), delay);
-        delay += unit;
-        // Flash off
-        setTimeout(() => console.log('OFF'), delay);
-        delay += unit;
-      } else if (char === '-') {
-        // Flash on
-        setTimeout(() => console.log('ON'), delay);
-        delay += unit * 3;
-        // Flash off
-        setTimeout(() => console.log('OFF'), delay);
-        delay += unit;
-      } else if (char === ' ') {
-        delay += unit * 2;
-      } else if (char === '/') {
-        delay += unit * 6;
+    if (!permission?.granted) {
+      const response = await requestPermission();
+      if (!response.granted) {
+        Alert.alert("Permission Required", "Camera permission is needed for the flashlight.");
+        return;
       }
     }
 
-    setTimeout(() => {
-      setFlashing(false);
-      Alert.alert("Transmission Complete", "[Ad: Ham Radio Gear]");
-    }, delay);
+    if (!text.trim()) {
+        Alert.alert("Input Required", "Please enter some text to transmit.");
+        return;
+    }
+
+    setFlashing(true);
+    abortController.current = new AbortController();
+    const signal = abortController.current.signal;
+
+    const events = generateMorseEvents(text);
+
+    try {
+      for (const event of events) {
+        if (signal.aborted) break;
+        setFlashOn(event.on);
+        await new Promise(resolve => setTimeout(resolve, event.duration));
+      }
+      if (!signal.aborted) {
+          Alert.alert("Transmission Complete", "Message sent successfully.");
+      }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        // Only reset if we finished naturally (not aborted, or if aborted we handle it in stopTransmission)
+        // Actually stopTransmission handles state.
+        // If we finished naturally:
+        if (!signal.aborted) {
+            setFlashing(false);
+            setFlashOn(false);
+        }
+    }
   };
 
   return (
     <View style={styles.container}>
+      {/* Hidden Camera View for Torch Control */}
+      {permission?.granted && (
+        <CameraView
+          style={{ width: 0, height: 0 }}
+          enableTorch={flashOn}
+        />
+      )}
+
       <Text style={styles.title}>Morse Code Flasher 🔦</Text>
 
       <TextInput
         style={styles.input}
         placeholder="Enter Text"
+        placeholderTextColor="#999"
         value={text}
         onChangeText={setText}
+        accessibilityLabel="Text input for Morse code"
       />
 
-      <TouchableOpacity style={[styles.btn, flashing && styles.btnActive]} onPress={transmit} disabled={flashing}>
-        <Text style={styles.btnText}>{flashing ? 'TRANSMITTING...' : 'FLASH MESSAGE'}</Text>
+      <TouchableOpacity
+        style={[styles.btn, flashing && styles.btnActive]}
+        onPress={transmit}
+        accessibilityLabel={flashing ? "Stop Transmitting" : "Start Transmitting"}
+        accessibilityRole="button"
+      >
+        <Text style={styles.btnText}>{flashing ? 'STOP TRANSMITTING' : 'FLASH MESSAGE'}</Text>
       </TouchableOpacity>
 
-      <Text style={styles.code}>{text.toUpperCase().split('').map(c => MORSE_CODE[c]).join(' ')}</Text>
+      <Text style={styles.code}>{textToMorse(text)}</Text>
 
       <View style={styles.ad}>
-        <Text>[Ad: Survival Gear]</Text>
+        <Text style={{ color: '#fff' }}>[Ad: Survival Gear]</Text>
       </View>
-      <StatusBar style="auto" />
+      <StatusBar style="light" />
     </View>
   );
 }
@@ -91,7 +119,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 24, fontWeight: 'bold', marginBottom: 40, color: '#fff' },
   input: { width: '100%', backgroundColor: '#fff', padding: 15, borderRadius: 5, fontSize: 18, marginBottom: 20 },
   btn: { width: '100%', padding: 20, backgroundColor: '#ffca28', borderRadius: 5, alignItems: 'center' },
-  btnActive: { backgroundColor: '#ff6f00' },
+  btnActive: { backgroundColor: '#e65100' },
   btnText: { fontWeight: 'bold', fontSize: 18, color: '#212121' },
   code: { color: '#ffca28', fontSize: 24, marginTop: 40, fontFamily: 'monospace', textAlign: 'center' },
   ad: { position: 'absolute', bottom: 20, padding: 10, backgroundColor: '#424242', width: '100%', alignItems: 'center' }
